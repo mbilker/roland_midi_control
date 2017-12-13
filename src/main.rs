@@ -68,33 +68,6 @@ fn main() {
 
       put_p.write(&e).unwrap();
     }
-/*
-        let mut put_p = MidiOutPort::new(&mut maker, ps);
-        put_p
-            .write(&RawMidi {
-                time: 0,
-                bytes: &[
-*/
-//                    0b10010000, /* Note On, channel 1 */
-//                    0b01000000, /* Key number */
-//                    0b01111111 /* Velocity */,
-/*
-                ],
-            })
-            .unwrap();
-        put_p
-            .write(&RawMidi {
-                time: ps.n_frames() / 2,
-                bytes: &[
-*/
-//                    0b10000000, /* Note Off, channel 1 */
-//                    0b01000000, /* Key number */
-//                    0b01111111 /* Velocity */,
-/*
-                ],
-            })
-            .unwrap();
-*/
     JackControl::Continue
   };
 
