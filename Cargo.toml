@@ -1,0 +1,8 @@
+[package]
+name = "midi_ctl"
+version = "0.1.0"
+authors = ["Matt Bilker <me@mbilker.us>"]
+
+[dependencies]
+jack	= "*"
+rimd	= { git = "https://github.com/RustAudio/rimd.git" }
