@@ -1,5 +1,5 @@
 [package]
-name = "midi_ctl"
+name = "midi_ctrl"
 version = "0.1.0"
 authors = ["Matt Bilker <me@mbilker.us>"]
 
