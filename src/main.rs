@@ -35,7 +35,7 @@ enum ProgramState {
   LoadedRules,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum MFXType {
   Thru,           // P-00: Thru
   StereoEQ,       // P-01: Stereo-EQ
@@ -64,7 +64,7 @@ impl MFXType {
   }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 struct RolandSysEx {
   device_id: u8,
 }
@@ -133,6 +133,13 @@ fn main() {
   //let output_system_port = "MIDI monitor:midi_in";
 
   let sysex = RolandSysEx::new(0x10);
+  let rules = [
+    vec![0xf0, 0x7e, 0x7f, 0x09, 0x01, 0xf7],   // Turn General MIDI System On
+    sysex.enable_mfx(0x01, true),               // Enable M-FX for A01
+    sysex.enable_mfx(0x02, true),               // Enable-M-FX for A02
+    //sysex.set_mfx_type(MFXType::Distortion),   // Set M-FX to P-06: Distortion
+    sysex.set_mfx_type(MFXType::LoFi2),         // Set M-FX to P34: Lo-Fi 2
+  ];
 
   let cback = move |_: &Client, ps: &ProcessScope| -> JackControl {
     let connected_num = maker.connected_count() > 0;
@@ -147,17 +154,10 @@ fn main() {
         }
       },
       ProgramState::ConnectedPorts => {
-        let rules = &[
-          vec![0xf0, 0x7e, 0x7f, 0x09, 0x01, 0xf7],   // Turn General MIDI System On
-          sysex.enable_mfx(0x01, true),               // Enable M-FX for A01
-          sysex.enable_mfx(0x02, true),               // Enable-M-FX for A02
-          //sysex.set_mfx_type(MFXType::Distortion),   // Set M-FX to P-06: Distortion
-          sysex.set_mfx_type(MFXType::LoFi2),         // Set M-FX to P34: Lo-Fi 2
-        ];
-        for rule in rules {
+        for rule in &rules {
           let msg = RawMidi {
             time: 0,
-            bytes: rule,
+            bytes: &rule,
           };
           put_p.write(&msg).unwrap();
           println!("{}", MidiMessage::from_bytes(msg.bytes.to_vec()));
