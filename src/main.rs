@@ -1,4 +1,5 @@
 #![allow(unused_imports)]
+#![allow(dead_code)]
 
 extern crate jack;
 extern crate rimd;
@@ -96,9 +97,13 @@ impl RolandSysEx {
     msg
   }
 
-  // Enable M-FX for part, 0x40 0x4X 0x22 0x01, X = "Part Number"
-  pub fn enable_mfx(&self, part: u8) -> Vec<u8> {
-    self.data(&[0x40, 0x40 + part, 0x22], &[0x01])
+  // Enable/Disable M-FX for part, 0x40 0x4X 0x22 0x01, X = "Part Number"
+  pub fn enable_mfx(&self, part: u8, enable: bool) -> Vec<u8> {
+    let value = match enable {
+      true  => 0x01,
+      false => 0x00,
+    };
+    self.data(&[0x40, 0x40 + part, 0x22], &[value])
   }
 
   // Set M-FX to type, 0x40 0x03 0x00 + mode value
@@ -127,6 +132,8 @@ fn main() {
   let output_system_port = DEFAULT_OUTPUT_PORT;
   //let output_system_port = "MIDI monitor:midi_in";
 
+  let sysex = RolandSysEx::new(0x10);
+
   let cback = move |_: &Client, ps: &ProcessScope| -> JackControl {
     let connected_num = maker.connected_count() > 0;
 
@@ -140,18 +147,18 @@ fn main() {
         }
       },
       ProgramState::ConnectedPorts => {
-        let rules = vec![
-          RolandSysEx::new(0x10).enable_mfx(0x01),                    // Enable M-FX for A01
-          RolandSysEx::new(0x10).enable_mfx(0x02),                    // Enable M-FX for A02
-          RolandSysEx::new(0x10).set_mfx_type(MFXType::Distortion),   // Set M-FX to P-06: Distortion
+        let rules = &[
+          vec![0xf0, 0x7e, 0x7f, 0x09, 0x01, 0xf7],   // Turn General MIDI System On
+          sysex.enable_mfx(0x01, true),               // Enable M-FX for A01
+          sysex.enable_mfx(0x02, true),               // Enable-M-FX for A02
+          //sysex.set_mfx_type(MFXType::Distortion),   // Set M-FX to P-06: Distortion
+          sysex.set_mfx_type(MFXType::LoFi2),         // Set M-FX to P34: Lo-Fi 2
         ];
-        let mut time = 0;
         for rule in rules {
           let msg = RawMidi {
-            time: time,
-            bytes: &rule,
+            time: 0,
+            bytes: rule,
           };
-          time += 1;
           put_p.write(&msg).unwrap();
           println!("{}", MidiMessage::from_bytes(msg.bytes.to_vec()));
         }
