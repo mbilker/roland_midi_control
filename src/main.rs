@@ -49,40 +49,44 @@ impl MFXType {
 
 #[derive(Debug)]
 struct RolandSysEx {
-  data: Vec<u8>,
+  device_id: u8,
 }
 
 impl RolandSysEx {
   pub fn new(device_id: u8) -> Self {
-    let mut data = ROLAND_SYSEX_PREFIX.to_owned();
-    data[2] = device_id;
-
     Self {
-      data,
+      device_id,
     }
   }
 
-  fn data(mut self, address: &[u8], data: &[u8]) -> Vec<u8> {
+  fn data(&self, address: &[u8], data: &[u8]) -> Vec<u8> {
     let sum = address.into_iter().sum::<u8>() + data.into_iter().sum::<u8>();
     let checksum = 0x80 - sum % 0x80;
 
+    // Allocate array with the exact size to avoid reallocation
+    let len = ROLAND_SYSEX_PREFIX.len() + data.len() + 2;
+    let mut msg = Vec::with_capacity(len);
+    msg.extend_from_slice(ROLAND_SYSEX_PREFIX);
+
+    msg[2] = self.device_id;
+
     // Copy elements 5-7, Rust ranges exclude the last element
     for i in 5..8 {
-      self.data[i] = address[i - 5];
+      msg[i] = address[i - 5];
     }
-    self.data.extend_from_slice(data);
-    self.data.push(checksum);
-    self.data.push(END_OF_EXCLUSIVE);
-    self.data
+    msg.extend_from_slice(data);
+    msg.push(checksum);
+    msg.push(END_OF_EXCLUSIVE);
+    msg
   }
 
   // Enable M-FX for part, 0x40 0x4X 0x22 0x01, X = "Part Number"
-  pub fn enable_mfx(self, part: u8) -> Vec<u8> {
+  pub fn enable_mfx(&self, part: u8) -> Vec<u8> {
     self.data(&[0x40, 0x40 + part, 0x22], &[0x01])
   }
 
   // Set M-FX to type, 0x40 0x03 0x00 + mode value
-  pub fn set_mfx_type(self, mode: MFXType) -> Vec<u8> {
+  pub fn set_mfx_type(&self, mode: MFXType) -> Vec<u8> {
     self.data(&[0x40, 0x03, 0x00], mode.value())
   }
 }
