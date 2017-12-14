@@ -10,8 +10,10 @@ use rimd::MidiMessage;
 use std::io;
 
 mod sysex;
+mod mfx;
 
 use sysex::*;
+use mfx::*;
 
 static DEFAULT_OUTPUT_PORT: &'static str = "alsa_midi:Scarlett 2i4 USB MIDI 1 (in)";
 
