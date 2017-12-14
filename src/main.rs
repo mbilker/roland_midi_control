@@ -10,8 +10,22 @@ use std::io;
 
 static DEFAULT_OUTPUT_PORT: &'static str = "alsa_midi:Scarlett 2i4 USB MIDI 1 (in)";
 
-// Checksum Algorithm:
-// checksum = 0x80 - (sum of address and data bytes) % 128
+// Checksum Algorithm = 0x80 - (sum of address and data bytes) % 0x80
+
+// System Exclusive Message Format:
+// 0xf0 = System Exclusive Message status
+// 0x41 = Roland's Manufacturer ID
+// 0x00 = Device ID (REPLACE AT RUNTIME)
+// 0x42 = Model ID (GS)
+// 0x12 = Command ID (Data Type 1)
+// 0xXX = Address MSB (REPLACE AT RUNTIME)
+// 0xXX = Address (REPLACE AT RUNTIME)
+// 0xXX = Address LSB (REPLACE AT RUNTIME)
+// ...  = Data
+// 0xXX = Checksum
+// 0xf7 = End Of Exclusive
+static ROLAND_SYSEX_PREFIX: &'static [u8] = &[0xf0, 0x41, 0x00, 0x42, 0x12, 0x00, 0x00, 0x00];
+static END_OF_EXCLUSIVE: u8 = 0xf7;
 
 #[derive(Clone, Copy)]
 enum ProgramState {
@@ -21,27 +35,55 @@ enum ProgramState {
 }
 
 #[derive(Debug)]
-struct RolandSysEx {}
+enum MFXType {
+  Distortion,     // P-06: Distortion
+}
 
-// Enable M-FX, 40 4X 22 01, X = "Part Number"
-
-impl RolandSysEx {
-  fn enable_mfx(part: u8) -> Vec<u8> {
-    let checksum = 0x80 - (0x40 + 0x40 + part + 0x22) % 0x80;
-    vec![0x40, 0x40 + part, 0x22, 0x01, checksum]
+impl MFXType {
+  fn value(&self) -> &[u8; 2] {
+    match *self {
+      MFXType::Distortion => &[0x01, 0x11],
+    }
   }
 }
 
 #[derive(Debug)]
-enum MFxSetMode {
-  Distortion,   // P-06: Distortion
+struct RolandSysEx {
+  data: Vec<u8>,
 }
 
-impl MFxSetMode {
-  fn value(&self) -> &[u8; 3] {
-    match *self {
-      MFxSetMode::Distortion => &[0x03, 0x00, 0x01],
+impl RolandSysEx {
+  pub fn new(device_id: u8) -> Self {
+    let mut data = ROLAND_SYSEX_PREFIX.to_owned();
+    data[2] = device_id;
+
+    Self {
+      data,
     }
+  }
+
+  fn data(mut self, address: &[u8], data: &[u8]) -> Vec<u8> {
+    let sum = address.into_iter().sum::<u8>() + data.into_iter().sum::<u8>();
+    let checksum = 0x80 - sum % 0x80;
+
+    // Copy elements 5-7, Rust ranges exclude the last element
+    for i in 5..8 {
+      self.data[i] = address[i - 5];
+    }
+    self.data.extend_from_slice(data);
+    self.data.push(checksum);
+    self.data.push(END_OF_EXCLUSIVE);
+    self.data
+  }
+
+  // Enable M-FX for part, 0x40 0x4X 0x22 0x01, X = "Part Number"
+  pub fn enable_mfx(self, part: u8) -> Vec<u8> {
+    self.data(&[0x40, 0x40 + part, 0x22], &[0x01])
+  }
+
+  // Set M-FX to type, 0x40 0x03 0x00 + mode value
+  pub fn set_mfx_type(self, mode: MFXType) -> Vec<u8> {
+    self.data(&[0x40, 0x03, 0x00], mode.value())
   }
 }
 
@@ -79,9 +121,9 @@ fn main() {
       },
       ProgramState::ConnectedPorts => {
         let rules = vec![
-          vec![0xf0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x41, 0x22, 0x01, 0x5c, 0xf7],         // Enable M-FX for A01
-          vec![0xf0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x42, 0x22, 0x01, 0x5b, 0xf7],         // Enable M-FX for A02
-          vec![0xf0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x03, 0x00, 0x01, 0x11, 0x2b, 0xf7],   // Set M-FX to P-06: Distortion
+          RolandSysEx::new(0x10).enable_mfx(0x01),                    // Enable M-FX for A01
+          RolandSysEx::new(0x10).enable_mfx(0x02),                    // Enable M-FX for A02
+          RolandSysEx::new(0x10).set_mfx_type(MFXType::Distortion),   // Set M-FX to P-06: Distortion
         ];
         let mut time = 0;
         for rule in rules {
@@ -123,4 +165,20 @@ fn main() {
 
   // optional deactivation
   active_client.deactivate().unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_enable_mfx() {
+    assert_eq!(RolandSysEx::new(0x10).enable_mfx(0x01), vec![0xf0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x41, 0x22, 0x01, 0x5c, 0xf7]);
+    assert_eq!(RolandSysEx::new(0x10).enable_mfx(0x02), vec![0xf0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x42, 0x22, 0x01, 0x5b, 0xf7]);
+  }
+
+  #[test]
+  fn test_set_mfx_type() {
+    assert_eq!(RolandSysEx::new(0x10).set_mfx_type(MFXType::Distortion), vec![0xf0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x03, 0x00, 0x01, 0x11, 0x2b, 0xf7]);
+  }
 }
