@@ -1,9 +1,11 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 
+extern crate hex_slice;
 extern crate jack;
 extern crate rimd;
 
+use hex_slice::AsHex;
 use jack::prelude::{AsyncClient, Client, ClosureProcessHandler, JackControl, MidiInPort,
                     MidiInSpec, MidiOutPort, MidiOutSpec, PortFlags, ProcessScope, RawMidi, client_options};
 use rimd::MidiMessage;
@@ -67,12 +69,14 @@ fn main() {
       },
       ProgramState::ConnectedPorts => {
         for rule in &rules {
-          let msg = RawMidi {
+          let raw_msg = RawMidi {
             time: 0,
             bytes: &rule,
           };
-          put_p.write(&msg).unwrap();
-          println!("{}", MidiMessage::from_bytes(msg.bytes.to_vec()));
+          put_p.write(&raw_msg).unwrap();
+
+          let msg = MidiMessage::from_bytes(raw_msg.bytes.to_vec());
+          println!("{}: {:x}\tchannel: {:?}", msg.status(), msg.data.as_hex(), msg.channel());
         }
         current_state = ProgramState::LoadedRules;
       },
@@ -81,7 +85,7 @@ fn main() {
 
     for e in show_p.iter() {
       let msg = MidiMessage::from_bytes(e.bytes.to_vec());
-      println!("{}", msg);
+      println!("{}: {:x}\tchannel: {:?}", msg.status(), msg.data.as_hex(), msg.channel());
 
       put_p.write(&e).unwrap();
     }
