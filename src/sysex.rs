@@ -47,6 +47,9 @@ impl RolandSysEx {
     msg.extend_from_slice(data);
     msg.push(checksum);
     msg.push(END_OF_EXCLUSIVE);
+
+    assert_eq!(msg.capacity(), msg.len());
+
     msg
   }
 
