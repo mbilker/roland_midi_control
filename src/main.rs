@@ -8,7 +8,7 @@ extern crate rimd;
 use hex_slice::AsHex;
 use jack::prelude::{AsyncClient, Client, ClosureProcessHandler, JackControl, MidiInPort,
                     MidiInSpec, MidiOutPort, MidiOutSpec, PortFlags, ProcessScope, RawMidi, client_options};
-use rimd::MidiMessage;
+use rimd::{MidiMessage, Status};
 use std::io;
 
 mod sysex;
@@ -24,6 +24,14 @@ enum ProgramState {
   Initial,
   ConnectedPorts,
   LoadedRules,
+  WriteMessage,
+  Disabled,
+}
+
+#[derive(Clone, Copy)]
+enum DeviceModel {
+  Roland,
+  Launchpad,
 }
 
 fn main() {
@@ -32,6 +40,9 @@ fn main() {
 
   let mut current_state = ProgramState::Initial;
 
+  // Disable Roland stuff for Launchpad stuff
+  let device_model = DeviceModel::Launchpad;
+
   // process logic
   let mut maker = client.register_port("midi_out", MidiOutSpec::default()).unwrap();
   let shower = client.register_port("midi_in", MidiInSpec::default()).unwrap();
@@ -39,11 +50,14 @@ fn main() {
   let ports = client.ports(None, None, PortFlags::empty());
   println!("{:#?}", ports);
 
-  // Get name of output port to connect it to system output later
+  // Get name of input/output ports to connect it to system output later
+  let shower_info = shower.clone_unowned();
+  let shower_name = shower_info.name();
   let maker_info = maker.clone_unowned();
   let maker_name = maker_info.name();
 
-  let output_system_port = DEFAULT_OUTPUT_PORT;
+  //let output_system_port = DEFAULT_OUTPUT_PORT;
+  let output_system_port = "alsa_midi:Launchpad MK2 MIDI 1 (in)";
   //let output_system_port = "MIDI monitor:midi_in";
 
   let sysex = RolandSysEx::new(0x10);
@@ -54,6 +68,15 @@ fn main() {
     //sysex.set_mfx_type(MFXType::Distortion),   // Set M-FX to P-06: Distortion
     sysex.set_mfx_type(MFXType::LoFi2),         // Set M-FX to P34: Lo-Fi 2
   ];
+
+  let color = 0x64;
+  let msg = b"hello world!";
+  let scrolling_text = {
+    let mut buf = vec![0xf0, 0x00, 0x20, 0x29, 0x02, 0x18, 0x14, color, 0x00];
+    buf.extend(msg);
+    buf.push(0xf7);
+    buf
+  };
 
   let cback = move |_: &Client, ps: &ProcessScope| -> JackControl {
     let connected_num = maker.connected_count() > 0;
@@ -68,27 +91,49 @@ fn main() {
         }
       },
       ProgramState::ConnectedPorts => {
-        for rule in &rules {
-          let raw_msg = RawMidi {
-            time: 0,
-            bytes: &rule,
-          };
-          put_p.write(&raw_msg).unwrap();
+        match device_model {
+          DeviceModel::Roland => {
+            for rule in &rules {
+              let raw_msg = RawMidi {
+                time: 0,
+                bytes: rule,
+              };
+              put_p.write(&raw_msg).unwrap();
 
-          let msg = MidiMessage::from_bytes(raw_msg.bytes.to_vec());
-          println!("{}: {:x}\tchannel: {:?}", msg.status(), msg.data.as_hex(), msg.channel());
-        }
+              let msg = MidiMessage::from_bytes(raw_msg.bytes.to_vec());
+              println!("{}: {:x}\tchannel: {:?}", msg.status(), msg.data.as_hex(), msg.channel());
+            }
+          },
+          DeviceModel::Launchpad => {
+            put_p.write(&RawMidi {
+              time: 0,
+              bytes: &scrolling_text,
+            }).unwrap();
+          },
+        };
         current_state = ProgramState::LoadedRules;
       },
       _ => (),
     }
 
     for e in show_p.iter() {
+      let mut bytes = e.bytes.to_vec();
+
       let msg = MidiMessage::from_bytes(e.bytes.to_vec());
       println!("{}: {:x}\tchannel: {:?}", msg.status(), msg.data.as_hex(), msg.channel());
 
-      put_p.write(&e).unwrap();
+      let status = msg.status();
+      if status == Status::NoteOn {
+        bytes[0] = status as u8 | 2u8;
+        bytes[2] = 16;
+      }
+
+      put_p.write(&RawMidi {
+        time: e.time,
+        bytes: &bytes,
+      }).unwrap();
     }
+
     JackControl::Continue
   };
 
@@ -99,7 +144,7 @@ fn main() {
   active_client.connect_ports_by_name(maker_name, output_system_port).unwrap();
   println!("Connected to {}", output_system_port);
 
-  //active_client.connect_ports_by_name(maker_name, "MIDI monitor:midi_in").unwrap();
+  active_client.connect_ports_by_name("alsa_midi:Launchpad MK2 MIDI 1 (out)", shower_name).unwrap();
 
   // wait
   println!("Press any key to quit");
