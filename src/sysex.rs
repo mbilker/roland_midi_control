@@ -41,9 +41,7 @@ impl RolandSysEx {
     msg[2] = self.device_id;
 
     // Copy elements 5-7, Rust ranges exclude the last element
-    for i in 5..8 {
-      msg[i] = address[i - 5];
-    }
+    msg[5..8].clone_from_slice(&address[0..(8 - 5)]);
     msg.extend_from_slice(data);
     msg.push(checksum);
     msg.push(END_OF_EXCLUSIVE);
@@ -55,10 +53,7 @@ impl RolandSysEx {
 
   // Enable/Disable M-FX for part, 0x40 0x4X 0x22 0x01, X = "Part Number"
   pub fn enable_mfx(&self, part: u8, enable: bool) -> Vec<u8> {
-    let value = match enable {
-      true  => 0x01,
-      false => 0x00,
-    };
+    let value = if enable { 0x01 } else { 0x00 };
     self.data(&[0x40, 0x40 + part, 0x22], &[value])
   }
 
