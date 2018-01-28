@@ -1,15 +1,22 @@
-#![allow(unused_imports)]
 #![allow(dead_code)]
 
+extern crate enigo;
 extern crate hex_slice;
 extern crate jack;
+#[macro_use] extern crate lazy_static;
 extern crate rimd;
 
+use enigo::{Enigo, Key, KeyboardControllable};
 use hex_slice::AsHex;
 use jack::prelude::{AsyncClient, Client, ClosureProcessHandler, JackControl, MidiInPort,
                     MidiInSpec, MidiOutPort, MidiOutSpec, PortFlags, ProcessScope, RawMidi, client_options};
 use rimd::{MidiMessage, Status};
+
+use std::collections::hash_map::HashMap;
 use std::io;
+use std::sync::Mutex;
+use std::sync::mpsc;
+use std::thread;
 
 mod sysex;
 mod mfx;
@@ -19,12 +26,54 @@ use mfx::*;
 
 static DEFAULT_OUTPUT_PORT: &'static str = "alsa_midi:Scarlett 2i4 USB MIDI 1 (in)";
 
+lazy_static! {
+  static ref MIDI_KEYBOARD_MAPPING: Mutex<HashMap<u8, Key>> = {
+    let mut m = HashMap::new();
+
+    // Keypad numbers
+    m.insert(0x56, Key::Layout('7'));
+    m.insert(0x57, Key::Layout('8'));
+    m.insert(0x58, Key::Layout('9'));
+    m.insert(0x4c, Key::Layout('4'));
+    m.insert(0x4d, Key::Layout('5'));
+    m.insert(0x4e, Key::Layout('6'));
+    m.insert(0x42, Key::Layout('1'));
+    m.insert(0x43, Key::Layout('2'));
+    m.insert(0x44, Key::Layout('3'));
+
+    // P1
+    m.insert(11, Key::Layout('z')); // P1 1
+    m.insert(22, Key::Layout('s')); // P1 2
+    m.insert(12, Key::Layout('x')); // P1 3
+    m.insert(23, Key::Layout('d')); // P1 4
+    m.insert(13, Key::Layout('c')); // P1 5
+    m.insert(24, Key::Layout('f')); // P1 6
+    m.insert(14, Key::Layout('v')); // P1 7
+
+    // SDVX specific
+    m.insert(25, Key::Layout('g'));
+
+    // Game controls
+    m.insert(0x59, Key::Backspace); // Card Insert (handled separately)
+    m.insert(31, Key::Layout('q')); // P1 START
+    m.insert(32, Key::Layout('t')); // P1 TT-
+    m.insert(33, Key::Layout('r')); // P1 TT+
+    m.insert(34, Key::Layout('w')); // EFFECT
+    m.insert(35, Key::Layout('e')); // VEFX
+    m.insert(21, Key::Shift); // P1 TT+/-
+
+    Mutex::new(m)
+  };
+}
+
 #[derive(Clone, Copy)]
 enum ProgramState {
   Initial,
   ConnectedPorts,
   LoadedRules,
   WriteMessage,
+  WaitForScollingFinish,
+  SetBaseColors,
   Disabled,
 }
 
@@ -32,6 +81,13 @@ enum ProgramState {
 enum DeviceModel {
   Roland,
   Launchpad,
+}
+
+enum KeyboardControl {
+  Down(u8),
+  Up(u8),
+  RawDown(Key),
+  RawUp(Key),
 }
 
 fn main() {
@@ -70,13 +126,45 @@ fn main() {
   ];
 
   let color = 0x64;
-  let msg = b"hello world!";
+  let msg = b"fizz";
   let scrolling_text = {
     let mut buf = vec![0xf0, 0x00, 0x20, 0x29, 0x02, 0x18, 0x14, color, 0x00];
     buf.extend(msg);
     buf.push(0xf7);
     buf
   };
+
+  let base_led_states: HashMap<u8, MidiMessage> = {
+    let m = MIDI_KEYBOARD_MAPPING.lock().unwrap();
+    m.iter()
+      .map(|(key, _value)| (*key, MidiMessage::note_on(*key, 71, 0)))
+      .collect()
+  };
+
+  // Keyboard and mouse control handler
+  let (sender, receiver) = mpsc::channel();
+  let thread_handle = thread::spawn(move || {
+    let mut enigo = Enigo::new();
+
+    while let Ok(key) = receiver.recv() {
+      let m = MIDI_KEYBOARD_MAPPING.lock().unwrap();
+      match key {
+        KeyboardControl::Down(key) => {
+          if let Some(key) = m.get(&key) {
+            enigo.key_down(*key);
+          }
+        },
+        KeyboardControl::Up(key) => {
+          if let Some(key) = m.get(&key) {
+            enigo.key_up(*key);
+          }
+        },
+
+        KeyboardControl::RawDown(key) => enigo.key_down(key),
+        KeyboardControl::RawUp(key) => enigo.key_up(key),
+      };
+    }
+  });
 
   let cback = move |_: &Client, ps: &ProcessScope| -> JackControl {
     let connected_num = maker.connected_count() > 0;
@@ -111,27 +199,66 @@ fn main() {
             }).unwrap();
           },
         };
-        current_state = ProgramState::LoadedRules;
+        current_state = ProgramState::WaitForScollingFinish;
+      },
+      ProgramState::WaitForScollingFinish => {
+        for e in show_p.iter() {
+          if e.bytes == &[0xf0, 0x00, 0x20, 0x29, 0x02, 0x18, 0x15, 0xf7] {
+            current_state = ProgramState::SetBaseColors;
+            break;
+          }
+        }
+      },
+      ProgramState::SetBaseColors => {
+        for e in base_led_states.values() {
+          put_p.write(&RawMidi {
+            time: 0,
+            bytes: &e.data,
+          }).unwrap();
+        }
+        current_state = ProgramState::Disabled;
       },
       _ => (),
     }
 
     for e in show_p.iter() {
+      let mut overwritten = false;
       let mut bytes = e.bytes.to_vec();
 
       let msg = MidiMessage::from_bytes(e.bytes.to_vec());
       println!("{}: {:x}\tchannel: {:?}", msg.status(), msg.data.as_hex(), msg.channel());
 
       let status = msg.status();
-      if status == Status::NoteOn {
-        bytes[0] = status as u8 | 2u8;
-        bytes[2] = 16;
-      }
+      match status {
+        Status::NoteOn => {
+          bytes[0] = status as u8 | 2u8;
+          bytes[2] = 8;
 
-      put_p.write(&RawMidi {
-        time: e.time,
-        bytes: &bytes,
-      }).unwrap();
+          let event = KeyboardControl::Down(bytes[1]);
+          sender.send(event).unwrap();
+        },
+        Status::NoteOff => {
+          let event = KeyboardControl::Up(bytes[1]);
+          sender.send(event).unwrap();
+
+          if let Some(msg) = base_led_states.get(&bytes[1]) {
+            overwritten = true;
+
+            put_p.write(&RawMidi {
+              time: e.time,
+              bytes: msg.data.as_slice(),
+            }).unwrap();
+          }
+        },
+        _ => {},
+      };
+
+      if !overwritten {
+        put_p.write(&RawMidi {
+          time: e.time,
+          bytes: &bytes,
+        }).unwrap();
+      }
     }
 
     JackControl::Continue
@@ -153,4 +280,6 @@ fn main() {
 
   // optional deactivation
   active_client.deactivate().unwrap();
+
+  thread_handle.join().unwrap();
 }
