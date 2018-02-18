@@ -24,7 +24,7 @@ mod mfx;
 use sysex::*;
 use mfx::*;
 
-static DEFAULT_OUTPUT_PORT: &'static str = "alsa_midi:Scarlett 2i4 USB MIDI 1 (in)";
+static DEFAULT_OUTPUT_PORT: &'static str = "system:midi_playback_1";
 
 lazy_static! {
   static ref MIDI_KEYBOARD_MAPPING: Mutex<HashMap<u8, Key>> = {
@@ -77,12 +77,13 @@ enum ProgramState {
   Disabled,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum DeviceModel {
   Roland,
   Launchpad,
 }
 
+#[derive(Clone, Copy)]
 enum KeyboardControl {
   Down(u8),
   Up(u8),
@@ -97,7 +98,8 @@ fn main() {
   let mut current_state = ProgramState::Initial;
 
   // Disable Roland stuff for Launchpad stuff
-  let device_model = DeviceModel::Launchpad;
+  let device_model = DeviceModel::Roland;
+  //let device_model = DeviceModel::Launchpad;
 
   // process logic
   let mut maker = client.register_port("midi_out", MidiOutSpec::default()).unwrap();
@@ -112,8 +114,8 @@ fn main() {
   let maker_info = maker.clone_unowned();
   let maker_name = maker_info.name();
 
-  //let output_system_port = DEFAULT_OUTPUT_PORT;
-  let output_system_port = "alsa_midi:Launchpad MK2 MIDI 1 (in)";
+  let output_system_port = DEFAULT_OUTPUT_PORT;
+  //let output_system_port = "alsa_midi:Launchpad MK2 MIDI 1 (in)";
   //let output_system_port = "MIDI monitor:midi_in";
 
   let sysex = RolandSysEx::new(0x10);
@@ -191,15 +193,16 @@ fn main() {
               let msg = MidiMessage::from_bytes(raw_msg.bytes.to_vec());
               println!("{}: {:x}\tchannel: {:?}", msg.status(), msg.data.as_hex(), msg.channel());
             }
+            current_state = ProgramState::Disabled;
           },
           DeviceModel::Launchpad => {
             put_p.write(&RawMidi {
               time: 0,
               bytes: &scrolling_text,
             }).unwrap();
+            current_state = ProgramState::WaitForScollingFinish;
           },
         };
-        current_state = ProgramState::WaitForScollingFinish;
       },
       ProgramState::WaitForScollingFinish => {
         for e in show_p.iter() {
@@ -222,42 +225,52 @@ fn main() {
     }
 
     for e in show_p.iter() {
-      let mut overwritten = false;
-      let mut bytes = e.bytes.to_vec();
-
       let msg = MidiMessage::from_bytes(e.bytes.to_vec());
       println!("{}: {:x}\tchannel: {:?}", msg.status(), msg.data.as_hex(), msg.channel());
 
-      let status = msg.status();
-      match status {
-        Status::NoteOn => {
-          bytes[0] = status as u8 | 2u8;
-          bytes[2] = 8;
-
-          let event = KeyboardControl::Down(bytes[1]);
-          sender.send(event).unwrap();
+      match device_model {
+        DeviceModel::Roland => {
+          put_p.write(&RawMidi {
+            time: e.time,
+            bytes: e.bytes,
+          }).unwrap();
         },
-        Status::NoteOff => {
-          let event = KeyboardControl::Up(bytes[1]);
-          sender.send(event).unwrap();
+        DeviceModel::Launchpad => {
+          let mut overwritten = false;
+          let mut bytes = e.bytes.to_vec();
 
-          if let Some(msg) = base_led_states.get(&bytes[1]) {
-            overwritten = true;
+          let status = msg.status();
+          match status {
+            Status::NoteOn => {
+              bytes[0] = status as u8 | 2u8;
+              bytes[2] = 8;
 
+              let event = KeyboardControl::Down(bytes[1]);
+              sender.send(event).unwrap();
+            },
+            Status::NoteOff => {
+              let event = KeyboardControl::Up(bytes[1]);
+              sender.send(event).unwrap();
+
+              if let Some(msg) = base_led_states.get(&bytes[1]) {
+                overwritten = true;
+
+                put_p.write(&RawMidi {
+                  time: e.time,
+                  bytes: msg.data.as_slice(),
+                }).unwrap();
+              }
+            },
+            _ => {},
+          };
+
+          if !overwritten {
             put_p.write(&RawMidi {
               time: e.time,
-              bytes: msg.data.as_slice(),
+              bytes: &bytes,
             }).unwrap();
           }
         },
-        _ => {},
-      };
-
-      if !overwritten {
-        put_p.write(&RawMidi {
-          time: e.time,
-          bytes: &bytes,
-        }).unwrap();
       }
     }
 
@@ -271,7 +284,9 @@ fn main() {
   active_client.connect_ports_by_name(maker_name, output_system_port).unwrap();
   println!("Connected to {}", output_system_port);
 
-  active_client.connect_ports_by_name("alsa_midi:Launchpad MK2 MIDI 1 (out)", shower_name).unwrap();
+  if device_model == DeviceModel::Launchpad {
+    active_client.connect_ports_by_name("alsa_midi:Launchpad MK2 MIDI 1 (out)", shower_name).unwrap();
+  }
 
   // wait
   println!("Press any key to quit");
